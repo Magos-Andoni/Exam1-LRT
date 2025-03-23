@@ -1,218 +1,95 @@
 #!/usr/bin/env python3
+# Shebang 
 
-import rospy
-from geometry_msgs.msg import Twist
-from turtlesim.msg import Pose
-from turtlesim.srv import Spawn, Kill
-from std_srvs.srv import Empty
-import time
-import math
+import rospy  
+import math  
+from geometry_msgs.msg import Twist 
+from turtlesim.msg import Pose  
+from std_srvs.srv import Empty  # resetear la simulación.
 
-class RomboPentagono:
+class TurtleControl:
     def __init__(self):
-        # Initialize variables
-        self.pub = None
-        self.x_actual = 0
-        self.y_actual = 0
-        self.rate = rospy.Rate(10)  # 10 Hz frequency
+        rospy.init_node('turtle_keyboard_control', anonymous=True)  # Inicializa un nodo ROS.
+        self.pub = rospy.Publisher('/turtle1/cmd_vel', Twist, queue_size=10)  # Publicador para enviar comandos de velocidad.
+        self.pose_sub = rospy.Subscriber('/turtle1/pose', Pose, self.update_pose)  # Suscriptor para obtener la posición actual.
+        self.current_pose = None  # Inicializa la pose actual de la tortuga.
+        self.rate = rospy.Rate(10)  # Establece la tasa de ciclos del bucle en 10 Hz.
+        self.turtle_size = 0.5  # Asume un tamaño de la tortuga para cálculos de colisión.
 
-        # Workspace dimensions
-        self.ancho_area = 11
-        self.alto_area = 11
+    def update_pose(self, data):
+        self.current_pose = data  # Actualiza la posición actual con los datos recibidos.
 
-        # Kill the initial turtle at (5.5, 5.5)
-        self.kill_initial_turtle()
-
-    def actualizar_posicion(self, pose):
-        """Callback to get the current position of the turtle."""
-        self.x_actual = pose.x
-        self.y_actual = pose.y
-
-    def suscribirse_posicion(self, nombre_tortuga):
-        """Subscribe to the turtle's position topic."""
-        rospy.Subscriber(f'/{nombre_tortuga}/pose', Pose, self.actualizar_posicion)
-
-    def configurar_publicador(self, nombre_tortuga):
-        """Configure the velocity publisher for the turtle."""
-        self.pub = rospy.Publisher(f'/{nombre_tortuga}/cmd_vel', Twist, queue_size=10)
-
-    def kill_initial_turtle(self):
-        """Kill the default turtle in the workspace."""
-        rospy.wait_for_service('/kill')
-        try:
-            kill = rospy.ServiceProxy('/kill', Kill)
-            kill("turtle1")  # Kill the default turtle named 'turtle1'
-            rospy.loginfo("Initial turtle 'turtle1' killed.")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Failed to kill initial turtle: {e}")
-
-    def crear_tortuga(self, x, y, nombre):
-        """Create a turtle at the given coordinates."""
-        rospy.wait_for_service('/spawn')
-        try:
-            spawn = rospy.ServiceProxy('/spawn', Spawn)
-            spawn(x, y, 0.0, nombre)
-            rospy.loginfo(f"Turtle '{nombre}' created at ({x}, {y}).")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Failed to create turtle '{nombre}': {e}")
-
-    def mover_a_punto(self, x_destino, y_destino):
-        """Move the turtle to a point using proportional control."""
-        Kp = 1.0
-
+    def move_to_point(self, target_x, target_y, kp_linear=1.0, kp_angular=2.0):
         while not rospy.is_shutdown():
-            error_x = x_destino - self.x_actual
-            error_y = y_destino - self.y_actual
+            if self.current_pose is None:
+                continue  # Espera hasta que la posición actual esté disponible.
 
-            if abs(error_x) < 0.05 and abs(error_y) < 0.05:
-                rospy.loginfo(f"Reached point: ({x_destino}, {y_destino})")
+            # Calcula el ángulo hacia el objetivo y la distancia.
+            angle_to_target = math.atan2(target_y - self.current_pose.y, target_x - self.current_pose.x)
+            distance = math.sqrt((target_x - self.current_pose.x) ** 2 + (target_y - self.current_pose.y) ** 2)
+
+            # Ajusta la orientación para enfrentar al objetivo.
+            angle_error = angle_to_target - self.current_pose.theta
+            angle_error = math.atan2(math.sin(angle_error), math.cos(angle_error))
+
+            # Control proporcional para girar hacia el objetivo o avanzar hacia él.
+            if abs(angle_error) > 0.01: #error umbral
+                twist = Twist()
+                twist.angular.z = kp_angular * angle_error
+                self.pub.publish(twist)
+            elif distance > 0.05: #error umbral
+                twist = Twist()
+                twist.linear.x = kp_linear * distance
+                twist.angular.z = kp_angular * angle_error
+                self.pub.publish(twist)
+            else:
+                print(f"Reached corner at ({self.current_pose.x:.2f}, {self.current_pose.y:.2f})")
                 break
 
-            vel_x = max(min(Kp * error_x, 2.0), -2.0)
-            vel_y = max(min(Kp * error_y, 2.0), -2.0)
-
-            msg = Twist()
-            msg.linear.x = vel_x
-            msg.linear.y = vel_y
-
-            self.pub.publish(msg)
             self.rate.sleep()
 
-    def validar_espacio(self, puntos):
-        """Check if the points fit within the workspace."""
-        for x, y in puntos:
-            if x < 0 or x > self.ancho_area or y < 0 or y > self.alto_area:
-                return False
-        return True
+        self.pub.publish(Twist())  # Detiene la tortuga después de alcanzar el punto porque si no se des estabiliza.
+        rospy.sleep(0.5)
 
-    def dibujar_rombo(self, x_inicio, y_inicio):
-        """Draw a rhombus."""
-        rospy.loginfo("Drawing a rhombus...")
+    def valid_position(self, x, y):
+        # Verifica que la posición esté dentro de un rango permitido.
+        return x >= self.turtle_size and x <= 11 - self.turtle_size and y >= self.turtle_size and y <= 11 - self.turtle_size
 
-        diagonal_mayor = 3.0
-        diagonal_menor = 2.0
+    def request_position(self):
+        while True:
+            try:
+                x, y = map(float, input("Ingrese las coordenadas de inicio para dibujar la figura (x, y): ").split())
+                if self.valid_position(x, y):
+                    return x, y
+                else:
+                    print("La posición es inválida, la figura estaría fuera del área de dibujo. Intente nuevamente.")
+            except ValueError:
+                print("Entrada inválida. Por favor, ingrese coordenadas numéricas.")
 
-        puntos = [
-            (x_inicio, y_inicio),
-            (x_inicio + diagonal_mayor / 2, y_inicio + diagonal_menor / 2),
-            (x_inicio, y_inicio + diagonal_menor),
-            (x_inicio - diagonal_mayor / 2, y_inicio + diagonal_menor / 2),
-            (x_inicio, y_inicio)  # Return to the starting point to close the rhombus
-        ]
+    def draw_figure(self, figure_type):
+        start_x, start_y = self.request_position()
+        self.move_to_point(start_x, start_y)  # Mueve la tortuga a la posición inicial.
 
-        if not self.validar_espacio(puntos):
-            print("The rhombus does not fit in the workspace. Try different coordinates.")
-            return False
+        # Dibuja un rombo o un pentágono según el tipo de figura elegido.
+        if figure_type == 'rhombus':
+            # Código para dibujar un rombo.
+        elif figure_type == 'pentagon':
+            # Código para dibujar un pentágono.
 
-        for x, y in puntos:
-            self.mover_a_punto(x, y)
-            time.sleep(1)
-
-        # Notify the user that the rhombus has been drawn
-        print("Rhombus drawn successfully!")
-        input("Press any key to return to the menu...")
-
-        self.matar_tortuga("turtle2")  # Kill the turtle after drawing the rhombus
-        self.limpiar_area()  # Clear the workspace after drawing
-
-        return True
-
-    def dibujar_pentagono(self, x_inicio, y_inicio):
-        """Draw a pentagon."""
-        rospy.loginfo("Drawing a pentagon...")
-
-        lado = 2.0
-
-        puntos = []
-        for i in range(5):
-            angulo = 72 * i  # Each angle is 72 degrees for a pentagon
-            rad = math.radians(angulo)
-            x = x_inicio + lado * math.cos(rad)
-            y = y_inicio + lado * math.sin(rad)
-            puntos.append((x, y))
-
-        # Add the starting point again to close the pentagon
-        puntos.append(puntos[0])
-
-        if not self.validar_espacio(puntos):
-            print("The pentagon does not fit in the workspace. Try different coordinates.")
-            return False
-
-        for x, y in puntos:
-            self.mover_a_punto(x, y)
-            time.sleep(1)
-
-        # Notify the user that the pentagon has been drawn
-        print("Pentagon drawn successfully!")
-        input("Press any key to return to the menu...")
-
-        self.matar_tortuga("turtle2")  # Kill the turtle after drawing the pentagon
-        self.limpiar_area()  # Clear the workspace after drawing
-
-        return True
-
-    def matar_tortuga(self, nombre_tortuga):
-        """Kill the turtle after drawing the figure."""
-        rospy.wait_for_service('/kill')
-        try:
-            kill = rospy.ServiceProxy('/kill', Kill)
-            kill(nombre_tortuga)
-            rospy.loginfo(f"Turtle '{nombre_tortuga}' killed.")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Failed to kill turtle '{nombre_tortuga}': {e}")
-
-    def limpiar_area(self):
-        """Clear everything drawn in the workspace."""
-        rospy.wait_for_service('/clear')
-        try:
-            clear = rospy.ServiceProxy('/clear', Empty)
-            clear()
-            rospy.loginfo("Workspace cleared.")
-        except rospy.ServiceException as e:
-            rospy.logerr(f"Failed to clear the workspace: {e}")
-
-    def menu(self):
-        """Menu for drawing a rhombus or pentagon."""
+    def run(self):
         while not rospy.is_shutdown():
-            print("\nRhombus and Pentagon Menu")
-            print("1 -> Draw Rhombus")
-            print("2 -> Draw Pentagon")
-            print("3 -> Return to Main Menu")
-
-            opcion = input("Select an option: ")
-
-            if opcion == '3':
-                print("Returning to main menu...")
+            print("Press 'r' to draw rhombus, 'p' to draw pentagon, 'x' to exit")
+            command = input().strip().lower()
+            if command == 'x':
                 break
+            elif command == 'r':
+                self.draw_figure('rhombus')
+            elif command == 'p':
+                self.draw_figure('pentagon')
 
-            elif opcion == '1':
-                print("Selected option: Draw Rhombus")
-
-                while True:
-                    print("\nCoordinates for the rhombus")
-                    x_rombo = float(input("X coordinate: "))
-                    y_rombo = float(input("Y coordinate: "))
-
-                    self.crear_tortuga(x_rombo, y_rombo, 'turtle2')  # Create turtle at the provided coordinates
-                    self.suscribirse_posicion('turtle2')
-                    self.configurar_publicador('turtle2')
-
-                    if not self.dibujar_rombo(x_rombo, y_rombo):
-                        continue
-                    break
-
-            elif opcion == '2':
-                print("Selected option: Draw Pentagon")
-
-                while True:
-                    print("\nCoordinates for the pentagon")
-                    x_pentagono = float(input("X coordinate: "))
-                    y_pentagono = float(input("Y coordinate: "))
-
-                    self.crear_tortuga(x_pentagono, y_pentagono, 'turtle2')  # Create turtle at the provided coordinates
-                    self.suscribirse_posicion('turtle2')
-                    self.configurar_publicador('turtle2')
-
-                    if not self.dibujar_pentagono(x_pentagono, y_pentagono):
-                        continue
-                    break
+if __name__ == '__main__':
+    try:
+        turtle_control = TurtleControl()
+        turtle_control.run()  # Ejecuta el control principal del programa.
+    except rospy.ROSInterruptException:
+        pass  # Maneja la excepción de interrupción de ROS.
